@@ -1,5 +1,6 @@
 #include "plugin.h"
 #include "lib/helper.h"
+#include "lib/highscore.h"
 #include "lib/playback_control.h"
 
 PLUGIN_HEADER
@@ -13,72 +14,101 @@ PLUGIN_HEADER
 #define BTN_DOWN    BUTTON_SCROLL_FWD
 #define BTN_LEFT    BUTTON_LEFT
 #define BTN_RIGHT   BUTTON_RIGHT
+
+#elif (CONFIG_KEYPAD == SANSA_E200_PAD) || \
+      (CONFIG_KEYPAD == SANSA_FUZE_PAD)   
+#define BTN_SELECT  BUTTON_SELECT
+#define BTN_MENU    BUTTON_POWER
+#define BTN_UP      BUTTON_SCROLL_BACK
+#define BTN_DOWN    BUTTON_SCROLL_FWD
+#define BTN_LEFT    BUTTON_LEFT
+#define BTN_RIGHT   BUTTON_RIGHT
+      
 #else
 #error No keymap defined!
 #endif
 
+#define FILEPATH PLUGIN_GAMES_DIR "/yahtzee.score" 
+#define NUM_SCORES 5
+
 static const int FACE_SIZE = 30;
 static const int PIP_SIZE = 6;
-static const unsigned LCD_GREY = LCD_RGBPACK(105,105,105);
+static const unsigned LCD_RED    = LCD_RGBPACK(255,0,0);
+static const unsigned LCD_YELLOW = LCD_RGBPACK(255,255,0);
+static const unsigned LCD_GREEN  = LCD_RGBPACK(0,255,0);
+static const unsigned LCD_GREY   = LCD_RGBPACK(105,105,105);
 
-struct game_context {
+struct Scorecard {
     int utotal;     /* Upper section's total score */
     int bonus;      /* 35 if upper section's score is 63 or over */
     int ltotal;     /* Lower section's total score */
     int score;      /* Upper total + bonus + lower total */
-};
-struct game_context game = { 0, 0, 0, 0 };
+} game;
 
-typedef struct game_option {
+struct highscore scores[NUM_SCORES];
+
+typedef struct Option {
     char *label;    /* Textual explanation of dice combos */
-    bool disabled;  /* Can this option be selected by the player? */
+    bool disabled;  /* If true, option can't be selected by the player */
 } Option;
 
-Option *cursor;
+Option *cursor;     /* Tracks player input */
 Option opts[] = {
-    { "Ones",         true },    /* 0  */
-    { "Twos",         true },    /* 1  */
-    { "Threes",       true },    /* 2  */
-    { "Fours",        true },    /* 3  */
-    { "Fives",        true },    /* 4  */
-    { "Sixes",        true },    /* 5  */
-    { "3 of a Kind",  true },    /* 6  */
-    { "4 of a Kind",  true },    /* 7  */
-    { "Full House",   true },    /* 8  */
-    { "Sm Straight",  true },    /* 9  */
-    { "Lg Straight",  true },    /* 10 */
-    { "Yahtzee",      true },    /* 11 */
-    { "Chance",       true },    /* 12 */
-    { "",             true },    /* 13 - Die 1 */
-    { "",             true },    /* 14 - Die 2 */
-    { "",             true },    /* 15 - Die 3 */
-    { "",             true },    /* 16 - Die 4 */
-    { "",             true },    /* 17 - Die 5 */
-    { "",             false }    /* 18 - Roll Dice */
+    { "Ones",             true },    /* 0  */
+    { "Twos",             true },    /* 1  */
+    { "Threes",           true },    /* 2  */
+    { "Fours",            true },    /* 3  */
+    { "Fives",            true },    /* 4  */
+    { "Sixes",            true },    /* 5  */
+    { "3 of a Kind",      true },    /* 6  */
+    { "4 of a Kind",      true },    /* 7  */
+    { "Full House (25)",  true },    /* 8  */
+    { "Sm Straight (30)", true },    /* 9  */
+    { "Lg Straight (40)", true },    /* 10 */
+    { "Yahtzee (50)",     true },    /* 11 */
+    { "Chance",           true },    /* 12 */
+    { "",                 true },    /* 13 - Die 1 */
+    { "",                 true },    /* 14 - Die 2 */
+    { "",                 true },    /* 15 - Die 3 */
+    { "",                 true },    /* 16 - Die 4 */
+    { "",                 true },    /* 17 - Die 5 */
+    { "",                 false }    /* 18 - Roll! */
 };
-#define NOPTS (sizeof opts / sizeof opts[0])
+#define NUM_OPTS (sizeof opts / sizeof opts[0])
+enum {
+    THREE_OF_A_KIND = 6,
+    FOUR_OF_A_KIND  = 7,
+    FULL_HOUSE      = 8,
+    SM_STRAIGHT     = 9,
+    LG_STRAIGHT     = 10,
+    YAHTZEE         = 11,
+    CHANCE          = 12,
+};
 
-#define THREE_OF_A_KIND 6
-#define FOUR_OF_A_KIND  7
-#define FULL_HOUSE      8
-#define SM_STRAIGHT     9
-#define LG_STRAIGHT     10
-#define YAHTZEE         11
-#define CHANCE          12
-
-typedef struct rolled_die {
+typedef struct Die {
     int value;      /* The value of the die (ex: 1, 3, 6) */
-    bool held;      /* Does the player want to hold this die? */
+    bool held;      /* If true, exclude this die from re-rolls */
 } Die;
 
 Die dice[] = {      /* Array of dice for the player to roll */
-    { 1, true },
-    { 2, true },
-    { 3, true },
-    { 4, true },
-    { 5, true }
+    { 0, true },
+    { 0, true },
+    { 0, true },
+    { 0, true },
+    { 0, true }
 };
-#define NDICE (sizeof dice / sizeof dice[0])
+#define NUM_DICE (sizeof dice / sizeof dice[0])
+
+MENUITEM_STRINGLIST(menu, "Yahtzee Menu", NULL, 
+    "Play Game", 
+    "High Scores", 
+    "Quit"
+);
+enum { 
+    MENU_PLAY   = 0, 
+    MENU_SCORES = 1, 
+    MENU_QUIT   = 2 
+};
 
 void draw_top_left(int xpos, int ypos, int psize)
 {
@@ -195,7 +225,7 @@ void draw_die(int xpos, int ypos, int value, bool is_small, bool disabled)
         draw_bottom_right(xpos, ypos, fsize, psize);
         break;
 
-    default: /* No pips - only used for Chance */
+    default: /* No pips */
         break;
     }
 }
@@ -203,163 +233,143 @@ void draw_die(int xpos, int ypos, int value, bool is_small, bool disabled)
 void draw_dice()
 {
     Die *d;
-    int offset = 15;
-    int xpos = (LCD_WIDTH/2) + (LCD_WIDTH/4) - (FACE_SIZE/2);
-    for (d = dice; d < dice + NDICE; d++) {
-        draw_die(xpos, offset, d->value, false, d->held);
-        offset += 35;
-    }
+    int ypos, xpos = (LCD_WIDTH/2) + (LCD_WIDTH/4) + 1; 
+    
+    for (d = dice, ypos = 13; d < dice + NUM_DICE; d++, ypos += 35) 
+        draw_die(xpos, ypos, d->value, false, d->held);
 }
 
 void draw_combos()
 {
+    int i, xpos, offset = (LCD_WIDTH/2) + 15; 
+
     /* Upper section - multiples of 1 through 6 */
-    int i, offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 5; i >= 0; i--) {
-        draw_die(offset, 10, i+1, true, opts[i].disabled);
-        offset -= 20;
-    }
+    for (i = 5, xpos = offset; i >= 0; i--, xpos -= 20) 
+        draw_die(xpos, 10, i+1, true, opts[i].disabled);
     
     /* 3 of a kind */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 0; i < 3; i++) {
-        draw_die(offset, 50, 1, true, opts[THREE_OF_A_KIND].disabled);
-        offset -= 20;
-    }
+    for (i = 0, xpos = offset; i < 3; i++, xpos -= 20) 
+        draw_die(xpos, 50, 1, true, opts[THREE_OF_A_KIND].disabled);
     
     /* 4 of a kind */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 0; i < 4; i++) {
-        draw_die(offset, 70, 1, true, opts[FOUR_OF_A_KIND].disabled);
-        offset -= 20;
-    }
+    for (i = 0, xpos = offset; i < 4; i++, xpos -= 20) 
+        draw_die(xpos, 70, 1, true, opts[FOUR_OF_A_KIND].disabled);
 
     /* Full house */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 0; i < 3; i++) {
-        draw_die(offset, 90, 2, true, opts[FULL_HOUSE].disabled);
-        offset -= 20;
-    }
-    for (i = 0; i < 2; i++) {
-        draw_die(offset, 90, 1, true, opts[FULL_HOUSE].disabled);
-        offset -= 20;
-    }
+    for (i = 0, xpos = offset; i < 3; i++, xpos -= 20) 
+        draw_die(xpos, 90, 2, true, opts[FULL_HOUSE].disabled);
+    for (i = 0; i < 2; i++, xpos -= 20) 
+        draw_die(xpos, 90, 1, true, opts[FULL_HOUSE].disabled);
 
     /* Small straight */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 4; i > 0; i--) {
-        draw_die(offset, 110, i, true, opts[SM_STRAIGHT].disabled);
-        offset -= 20;
-    }
+    for (i = 4, xpos = offset; i > 0; i--, xpos -= 20) 
+        draw_die(xpos, 110, i, true, opts[SM_STRAIGHT].disabled);
 
     /* Large straight */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 5; i > 0; i--) {
-        draw_die(offset, 130, i, true, opts[LG_STRAIGHT].disabled);
-        offset -= 20;
-    }
+    for (i = 5, xpos = offset; i > 0; i--, xpos -= 20) 
+        draw_die(xpos, 130, i, true, opts[LG_STRAIGHT].disabled);
 
     /* Yahtzee */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 0; i < 5; i++) {
-        draw_die(offset, 150, 1, true, opts[YAHTZEE].disabled);
-        offset -= 20;
-    }
+    for (i = 0, xpos = offset; i < 5; i++, xpos -= 20) 
+        draw_die(xpos, 150, 1, true, opts[YAHTZEE].disabled);
 
     /* Chance */
-    offset = (LCD_WIDTH/2) - (FACE_SIZE/2);
-    for (i = 0; i < 5; i++) {
-        draw_die(offset, 170, 7, true, opts[CHANCE].disabled);
-        offset -= 20;
-    }
+    for (i = 0, xpos = offset; i < 5; i++, xpos -= 20) 
+        draw_die(xpos, 170, 7, true, opts[CHANCE].disabled);
 }
 
-void draw_text()
+int draw_text(int rolls)
 {
-    char score[24];
-    rb->lcd_set_foreground(LCD_WHITE);
+    int width, height;
+    char score[20], roll[20];
+    rb->lcd_set_foreground(LCD_RED);
 
     /* Selected combo label */
-    rb->lcd_putsxy(10, LCD_HEIGHT-30, cursor->label);
+    rb->lcd_getstringsize(cursor->label, &width, &height);
+    rb->lcd_putsxy(10, LCD_HEIGHT - (height * 2) - 2, cursor->label);
 
     /* Player's score */
-    game.score = game.utotal + game.bonus + game.ltotal;
     rb->snprintf(score, sizeof(score), "Score: %d", game.score);
-    rb->lcd_putsxy(10, LCD_HEIGHT-14, score);
+    rb->lcd_getstringsize(score, &width, &height);
+    rb->lcd_putsxy(10, LCD_HEIGHT - height - 2, score);
 
-    /* "Roll Dice" option */
-    rb->lcd_putsxy((LCD_WIDTH/2), LCD_HEIGHT-14, "ROLL DICE");
+    /* "Roll" option */
+    if (rolls > 0)
+        rb->snprintf(roll, sizeof(roll), "ROLL %d", rolls);
+    else
+        rb->strcpy(roll, "ROLL");
+    rb->lcd_getstringsize(roll, &width, &height);
+    rb->lcd_putsxy(LCD_WIDTH-width - 10, LCD_HEIGHT - height - 2, roll);
+    return (LCD_WIDTH - width - 10);
 }
 
-void draw_cursor()
+void draw_cursor(int tpos)
 {
-    int i, xoffset, yoffset;
-    rb->lcd_set_foreground(LCD_WHITE);
+    int i, xpos, ypos;
+    rb->lcd_set_foreground(LCD_YELLOW);
 
     /* Upper section combos */
-    xoffset = (LCD_WIDTH/2) - 10;
+    xpos = (LCD_WIDTH/2) + 20;
     for (i = 5; i >= 0; i--) {
         if (cursor == opts + i) {
-            rb->lcd_fillrect(xoffset, 30, PIP_SIZE, PIP_SIZE);
+            rb->lcd_fillrect(xpos, 28, PIP_SIZE, PIP_SIZE);
             return;
         } else {
-            xoffset -= 20;
+            xpos -= 20;
         }
     }
     
     /* Lower section combos */
-    yoffset = 55;
-    for (i = 6; i <= 12; i++) {
+    for (i = 6, ypos = 55; i <= 12; i++) {
         if (cursor == opts + i) {
-            int xpos = (LCD_WIDTH/2) + PIP_SIZE;
-            rb->lcd_fillrect(xpos, yoffset, PIP_SIZE, PIP_SIZE);
+            xpos = (LCD_WIDTH/2) + PIP_SIZE + 27;
+            rb->lcd_fillrect(xpos, ypos, PIP_SIZE, PIP_SIZE);
             return;
         } else {
-            yoffset += 20;
+            ypos += 20;
         }
     }
     
     /* Player's dice */
-    yoffset = 25;
-    for (i = 13; i <= 17; i++) {
+    for (i = 13, ypos = 25; i <= 17; i++) {
         if (cursor == opts + i) {
-            int xpos = (LCD_WIDTH/2) + (LCD_WIDTH/4) + (FACE_SIZE/2) + 5;
-            rb->lcd_fillrect(xpos, yoffset, PIP_SIZE, PIP_SIZE);
+            xpos = (LCD_WIDTH/2) + (LCD_WIDTH/4) + FACE_SIZE + 4;
+            rb->lcd_fillrect(xpos, ypos, PIP_SIZE, PIP_SIZE);
             return;
         } else {
-            yoffset += 35;
+            ypos += 35;
         }
     }
     
-    /* "Roll Dice" option */
-    if (cursor == opts + (NOPTS - 1)) {
-        int xpos = (LCD_WIDTH/2) - PIP_SIZE - 5;
-        rb->lcd_fillrect(xpos, LCD_HEIGHT-10, PIP_SIZE, PIP_SIZE);
+    /* "Roll" option */
+    if (cursor == opts + (NUM_OPTS - 1)) {
+        xpos = (LCD_WIDTH/2) - PIP_SIZE - 5;
+        rb->lcd_fillrect(tpos-PIP_SIZE-5, LCD_HEIGHT-10, PIP_SIZE, PIP_SIZE);
     }
 }
 
-void enable_combos()
+void set_combos(bool disabled)
 {
     Option *o;
-    for (o = opts; o < opts + NOPTS; o++)
-        o->disabled = false;
+    for (o = opts; o < opts + NUM_OPTS; o++)
+        o->disabled = disabled;
 }
 
-void enable_dice()
+void set_dice(bool disabled)
 {
     Die *d;
-    for (d = dice; d < dice + NDICE; d++)
-        d->held = false;
+    for (d = dice; d < dice + NUM_DICE; d++)
+        d->held = disabled;
 
     Option *o;
     for (o = opts + 13; o <= opts + 17; o++)
-        o->disabled = false;
+        o->disabled = disabled;
 }
 
 void roll_dice()
 {
     Die *d;
-    for (d = dice; d < dice + NDICE; d++) {
+    for (d = dice; d < dice + NUM_DICE; d++) {
         if (!d->held)
             d->value = rb->rand() % 6 + 1; /* Random number 1-6 */
     }
@@ -369,33 +379,39 @@ int get_dice_sum()
 {
     Die *d;
     int sum = 0;
-    for (d = dice; d < dice + NDICE; d++)
+    for (d = dice; d < dice + NUM_DICE; d++)
         sum += d->value;
     return sum;
 }
 
-void calculate_score(int combo, int *yahtzees)
+void calculate_score(int combo, bool *bonus_applied, int *yahtzees)
 {
     Die *d;
 
     /* Upper section combos */
     if (combo < THREE_OF_A_KIND) {
-        for (d = dice; d < dice + NDICE; d++) {
+        for (d = dice; d < dice + NUM_DICE; d++) {
             if (d->value == combo + 1)
                 game.utotal += d->value;
         }
-        game.bonus = (game.utotal >= 63) ? 35 : 0;
+        if (!game.utotal >= 63 && !*bonus_applied) {
+            game.bonus = 35;
+            *bonus_applied = true;   
+        }
 
     /* Lower section combos */
     } else {
         int i, seq = 0;
-        int freq[6] = { 0, 0, 0, 0, 0, 0 };
-        bool pair = false, triple = false;
+        int freq[6];        /* Number of occurences of each die value */
+        bool pair, triple;  /* Used in testing for a Full House */
         
-        for (d = dice; d < dice + NDICE; d++)
+        for (i = 0; i < 6; freq[i++] = 0); /* Fill freq[] with zeroes */
+        for (d = dice; d < dice + NUM_DICE; d++)
             freq[d->value-1]++;
         
         switch(combo) {
+        
+        /* At least three dice showing the same face */
         case THREE_OF_A_KIND:
             for (i = 0; i < 6; i++) {
                 if (freq[i] >= 3) {
@@ -405,7 +421,8 @@ void calculate_score(int combo, int *yahtzees)
             }
             break;
 
-        case FOUR_OF_A_KIND:
+        /* At least four dice showing the same face */
+        case FOUR_OF_A_KIND: 
             for (i = 0; i < 6; i++) {
                 if (freq[i] >= 4) {
                     game.ltotal += get_dice_sum(); 
@@ -414,7 +431,9 @@ void calculate_score(int combo, int *yahtzees)
             }
             break;
 
-        case FULL_HOUSE:
+        /* A three-of-a-kind and a pair */
+        case FULL_HOUSE: 
+            pair = false, triple = false;
             for (i = 0; i < 6; i++) {
                 if (freq[i] == 2)
                     pair = true;
@@ -425,7 +444,8 @@ void calculate_score(int combo, int *yahtzees)
                 game.ltotal += 25;
             break;
 
-        case SM_STRAIGHT:
+        /* Four sequential dice (ex: 1-2-3-4) */
+        case SM_STRAIGHT: 
             for (i = 0; i < 6; i++) {
                 seq = (freq[i] >= 1) ? seq + 1 : 0; 
                 if (seq == 4) {
@@ -435,7 +455,8 @@ void calculate_score(int combo, int *yahtzees)
             }
             break;
 
-        case LG_STRAIGHT:
+        /* Five sequential dice (ex: 1-2-3-4-5) */
+        case LG_STRAIGHT: 
             for (i = 0; i < 6; i++) {
                 seq = (freq[i] == 1) ? seq + 1 : 0; 
                 if (seq == 5) {
@@ -445,7 +466,8 @@ void calculate_score(int combo, int *yahtzees)
             }
             break;
 
-        case YAHTZEE:
+        /* All five dice showing the same face */
+        case YAHTZEE: 
             for (i = 0; i < 6; i++) {
                 if (freq[i] == 5) {
                     game.ltotal += (*yahtzees == 0) ? 50 : 100;
@@ -455,31 +477,61 @@ void calculate_score(int combo, int *yahtzees)
             }
             break;
 
-        case CHANCE:
+        /* Any combination */
+        case CHANCE: 
             game.ltotal += get_dice_sum();
             break;
         }
     }
+    game.score = game.utotal + game.bonus + game.ltotal;
 }
 
-enum plugin_status plugin_start(const void* parameter)
+void reset_game()
 {
-    (void)parameter;
-    int button, i, rolls = 0, yahtzees = 0;
-    bool start = true, done = false;
-   
-    rb->srand(*rb->current_tick);   /* Seed the random number generator */
-    backlight_force_on();           /* Don't let the backlight turn off! */
-    cursor = opts + (NOPTS - 1);    /* Set cursor to "Roll Dice" option */
+    Die *d;
 
-    while (!done) {
+    /* Clear the scorecard */    
+    game.utotal = 0;    
+    game.bonus = 0;
+    game.ltotal = 0;
+    game.score = 0;
+    
+    /* Disable combos and rolled dice */
+    set_combos(true);
+    set_dice(true);
+    
+    /* Clear the faces of rolled dice */
+    for (d = dice; d < dice + NUM_DICE; d->value = 0, d++);
+    
+    cursor = opts + (NUM_OPTS - 1); /* Set cursor to "Roll" option */
+}
+
+void enter_game_loop()
+{
+    int button, i, rank, xpos, rolls = 0, yahtzees = 0;
+    bool bonus_applied, combos_left, start = true;
+    Option *o;
+
+    reset_game();
+
+    while (true) {
+
+        /* If there no unused dice combos left, exit the loop */
+        for (o = opts, combos_left = false; o <= opts + CHANCE; o++) {
+            if (!o->disabled) {
+                combos_left = true;
+                break;
+            }
+        }
+        if (!combos_left && !start)
+            goto done;
 
         /* Draw everything to the screen */
         rb->lcd_clear_display();
-        draw_text();
         draw_combos();
         draw_dice();
-        draw_cursor();
+        xpos = draw_text(rolls);
+        draw_cursor(xpos);
         rb->lcd_update();
 
         /* Block on player input */
@@ -490,14 +542,14 @@ enum plugin_status plugin_start(const void* parameter)
             /* Dice combo selection */
             for (i = 0; i <= 12; i++) {
                 if (cursor == (opts + i) && !cursor->disabled) {
-                    calculate_score(i, &yahtzees);
+                    calculate_score(i, &bonus_applied, &yahtzees);
                     cursor->disabled = true;
                     
                     /* Reset the dice for next turn */
-                    enable_dice();  
-                    roll_dice();    
                     rolls = 0;
-                    cursor = opts + (NOPTS - 1);
+                    roll_dice();
+                    set_dice(false);      
+                    cursor = opts + (NUM_OPTS - 1);
                     break;
                 }
             }
@@ -511,11 +563,11 @@ enum plugin_status plugin_start(const void* parameter)
                 }
             }
             
-            /* "Roll Dice" option selection */
-            if (cursor == (opts + (NOPTS - 1))) {
+            /* "Roll" option selection */
+            if (cursor == (opts + (NUM_OPTS - 1))) {
                 if (start) {
-                    enable_combos();
-                    enable_dice();
+                    set_combos(false);
+                    set_dice(false);
                     start = false;
                 }
                 if (rolls < 3) {
@@ -527,24 +579,76 @@ enum plugin_status plugin_start(const void* parameter)
 
         case BTN_LEFT:
         case BTN_UP:
-            cursor = (cursor == opts) ? opts + (NOPTS - 1) : cursor - 1;
+            if (!start)
+                cursor = (cursor == opts) ? opts + (NUM_OPTS - 1) : cursor - 1;
             break;
 
         case BTN_RIGHT:
         case BTN_DOWN:
-            cursor = (cursor == opts + (NOPTS - 1)) ? opts : cursor + 1;
+            if (!start)
+                cursor = (cursor == opts + (NUM_OPTS - 1)) ? opts : cursor + 1;
             break;
 
         case BTN_MENU:
-            done = true;
-            break;
+            return; /* Exit game without updating high scores */
+            break; 
 
-        default:
+        default: /* Undefined key - do nothing */
             break;
         }
-    }
+    }  
 
-    backlight_use_settings(); /* Return backlight control to Rockbox */
-    return PLUGIN_OK;
+done: 
+    /* Update high scores and exit */
+    rank = highscore_update(game.score, -1, "", scores, NUM_SCORES);  
+    if (rank != -1) {
+        rb->splash(HZ*3, "NEW HIGH SCORE!");
+        highscore_show(rank, scores, NUM_SCORES, false);
+    }
+}
+
+void open_menu(bool *quit)
+{
+    int result, selected = 0;
+
+    rb->lcd_clear_display();
+    rb->lcd_update();
+    rb->button_clear_queue();
+
+    result = rb->do_menu(&menu, &selected, NULL, false);
+    switch(result) {
+    case MENU_PLAY:
+        enter_game_loop();
+        break;
+        
+    case MENU_SCORES:
+        highscore_show(NUM_SCORES, scores, NUM_SCORES, false);
+        break;
+    
+    case MENU_QUIT:
+        *quit = true;
+        break;
+    }
+}
+
+enum plugin_status plugin_start(const void* parameter)
+{
+    (void)parameter;
+    bool quit = false;
+    
+    highscore_load(FILEPATH, scores, NUM_SCORES);
+    
+    rb->lcd_set_backdrop(NULL);     /* Remove the Rockbox background */
+    rb->lcd_set_background(LCD_BLACK);
+    rb->srand(*rb->current_tick);   /* Seed the random number generator */
+    backlight_force_on();           /* Don't let the backlight turn off! */
+
+    while (!quit) 
+        open_menu(&quit);
+
+    highscore_save(FILEPATH, scores, NUM_SCORES);
+    
+    backlight_use_settings();       /* Return backlight control to Rockbox */
+    return PLUGIN_OK;               /* Exit plugin */
 }
 

@@ -524,7 +524,7 @@ void enter_game_loop()
             }
         }
         if (!combos_left && !start)
-            goto done;
+            break;
 
         /* Draw everything to the screen */
         rb->lcd_clear_display();
@@ -597,8 +597,6 @@ void enter_game_loop()
             break;
         }
     }  
-
-done: 
     /* Update high scores and exit */
     rank = highscore_update(game.score, -1, "", scores, NUM_SCORES);  
     if (rank != -1) {
